@@ -121,6 +121,11 @@ rm -rf ~/.local/share/monitor-layout
 
 Remove the `# monitor-layout` block from `~/.config/hypr/bindings.lua`.
 
+## Special thanks
+
+- [@Duckonaut](https://github.com/Duckonaut): Original creator of the [split-monitor-workspaces](https://github.com/Duckonaut/split-monitor-workspaces) plugin
+- [@zjeffer](https://github.com/zjeffer): Current maintainer of [split-monitor-workspaces](https://github.com/zjeffer/split-monitor-workspaces)
+
 ## License
 
 MIT
