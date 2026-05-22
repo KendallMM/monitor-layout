@@ -201,11 +201,21 @@ handle_direction() {
 handle_monitors() {
     mapfile -t all_monitors < <(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name')
     local n=${#all_monitors[@]}
+    (( n >= 1 )) || return 0
 
-    # Step 1: pick primary monitor (workspace priority)
+    if (( n == 1 )); then
+        set_config_key PRIMARY_MONITOR "\"${all_monitors[0]}\""
+        set_config_key SECONDARY_MONITOR '""'
+        set_config_key TERTIARY_MONITOR '""'
+        monitor-layout extend
+        return 0
+    fi
+
+    # Step 1: pick primary monitor (gets lowest workspace numbers)
     local primary
-    primary=$(menu "Step 1 — Which monitor is PRIMARY (gets lowest workspace numbers)?" \
+    primary=$(menu "Step 1/${n} — Primary monitor (gets workspaces 1-N first):" \
         "${all_monitors[@]}") || return 0
+
     set_config_key PRIMARY_MONITOR "\"$primary\""
     set_config_key SECONDARY_MONITOR '""'
     set_config_key TERTIARY_MONITOR '""'
@@ -215,13 +225,10 @@ handle_monitors() {
         [[ "$m" != "$primary" ]] && remaining+=("$m")
     done
 
-    # Assign secondary/tertiary in remaining order (workspace priority)
     (( n >= 2 )) && set_config_key SECONDARY_MONITOR "\"${remaining[0]}\""
     (( n >= 3 )) && set_config_key TERTIARY_MONITOR "\"${remaining[1]}\""
 
-    (( n < 2 )) && { apply_now; return 0; }
-
-    # Step 2+: ask physical position of each monitor relative to previous
+    # Step 2+: physical position of each remaining monitor relative to the previous
     local -a pos_order=("$primary")
     local extend_dir=""
     local prev="$primary"
@@ -229,10 +236,10 @@ handle_monitors() {
 
     for m in "${remaining[@]}"; do
         local rel
-        rel=$(menu "Step ${step} — Where is ${m} physically relative to ${prev}?" \
-            "above" "below" "left" "right") || break
+        rel=$(menu "Step ${step}/${n} — Physical position of ${m} relative to ${prev}:" \
+            "above ↑" "below ↓" "left ←" "right →") || break
 
-        case "$rel" in
+        case "$(awk '{print $1}' <<< "$rel")" in
             above) extend_dir="vertical";    pos_order=("$m" "${pos_order[@]}") ;;
             below) extend_dir="vertical";    pos_order+=("$m") ;;
             left)  extend_dir="horizontal";  pos_order=("$m" "${pos_order[@]}") ;;
@@ -246,7 +253,7 @@ handle_monitors() {
     [[ -n "$extend_dir" ]] && set_config_key EXTEND_DIRECTION "$extend_dir"
     set_config_key EXTEND_ORDER "\"${pos_order[*]}\""
 
-    apply_now
+    monitor-layout extend
 }
 
 handle_reset() {

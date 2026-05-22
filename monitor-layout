@@ -74,22 +74,22 @@ detect_monitors() {
     info "Monitors (${MONITOR_COUNT}): ${MONITORS[*]}"
 }
 
-# Get a monitor's pixel width from hyprctl (fallback: 1920)
+# Get a monitor's logical width (physical ÷ scale) from hyprctl (fallback: 1920)
 monitor_width() {
     local mon="$1"
     local w
     w=$(hyprctl monitors all -j 2>/dev/null \
-        | jq -r --arg m "$mon" '.[] | select(.name==$m) | .width' 2>/dev/null \
+        | jq -r --arg m "$mon" '.[] | select(.name==$m) | (.width / .scale) | floor' 2>/dev/null \
         | grep -E '^[0-9]+$') || true
     echo "${w:-1920}"
 }
 
-# Get a monitor's pixel height from hyprctl (fallback: 1080)
+# Get a monitor's logical height (physical ÷ scale) from hyprctl (fallback: 1080)
 monitor_height() {
     local mon="$1"
     local h
     h=$(hyprctl monitors all -j 2>/dev/null \
-        | jq -r --arg m "$mon" '.[] | select(.name==$m) | .height' 2>/dev/null \
+        | jq -r --arg m "$mon" '.[] | select(.name==$m) | (.height / .scale) | floor' 2>/dev/null \
         | grep -E '^[0-9]+$') || true
     echo "${h:-1080}"
 }
@@ -179,28 +179,18 @@ end
 LUAEOF
 }
 
-# Emit per-workspace monitor-assignment rules for non-uniform custom distributions.
-# These pin each workspace to its monitor so Hyprland respects the custom split.
+# Emit per-workspace monitor-assignment rules for all monitors.
+# Always pinning overrides any persistent state from the plugin so priority
+# changes take full effect on reload.
 workspace_rules() {
     local n="$1"
-
-    # Auto-distribution is always uniform — the plugin handles it, no rules needed.
-    [[ -z "$WORKSPACE_DISTRIBUTION" ]] && return
-
-    local base=${MONITOR_WS_COUNTS[0]}
-    local uniform=true
-    for (( i=1; i<n; i++ )); do
-        (( MONITOR_WS_COUNTS[i] != base )) && uniform=false && break
-    done
-    "$uniform" && return
-
     for (( i=0; i<n; i++ )); do
         (( MONITOR_WS_COUNTS[i] == 0 )) && continue
         local s=${MONITOR_WS_STARTS[$i]}
-        local e=$(( s + MONITOR_WS_COUNTS[i] - 1 ))
+        local e=$(( s + MONITOR_WS_COUNTS[$i] - 1 ))
         local m="${MONITORS[$i]}"
         for (( ws=s; ws<=e; ws++ )); do
-            printf 'hl.keyword("workspace", "%d, monitor:%s, default:true, persistent:true")\n' "$ws" "$m"
+            printf 'hl.workspace_rule({ workspace = "%d", monitor = "%s", default = true, persistent = true })\n' "$ws" "$m"
         done
     done
 }
@@ -243,8 +233,7 @@ layout_extend() {
             printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 'auto' })\n" \
                 "${MONITORS[0]}"
             for (( i=1; i<n; i++ )); do
-                printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x-1080', scale = 1, disabled = true })\n" \
-                    "${MONITORS[$i]}"
+                printf "hl.monitor({ output = '%s', disabled = true })\n" "${MONITORS[$i]}"
             done
             printf 'local smw = hl.plugin.split_monitor_workspaces\n'
             printf 'if smw then\n'
@@ -268,7 +257,7 @@ layout_extend() {
     {
         local offset=0
         for (( i=0; i<n; i++ )); do
-            local scale="auto"
+            local scale="'auto'"
             (( i > 0 )) && scale=1
             if [[ "$EXTEND_DIRECTION" == vertical ]]; then
                 printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x%d', scale = %s })\n" \
