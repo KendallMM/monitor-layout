@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+# monitor-layout-config — Interactive workspace distribution configurator
+# https://github.com/bryanmarin/monitor-layout
+#
+# Keybind: Super+Alt+P
+# Config:  ~/.config/monitor-layout/config
+
+set -euo pipefail
+
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+ML_CONFIG_DIR="$XDG_CONFIG_HOME/monitor-layout"
+ML_CONFIG_FILE="$ML_CONFIG_DIR/config"
+SHARE_CONFIG="/usr/local/share/monitor-layout/config"
+
+# ── Defaults (mirrored from monitor-layout) ────────────────────────────────────
+TOTAL_WORKSPACES=10
+WORKSPACE_DISTRIBUTION=""
+PRIMARY_MONITOR=""
+SECONDARY_MONITOR=""
+TERTIARY_MONITOR=""
+EXTEND_DIRECTION=horizontal
+MENU_CMD="walker --dmenu --placeholder"
+
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf 'info: %s\n'  "$*" >&2; }
+
+load_config() {
+    [[ -f "$ML_CONFIG_FILE" ]] && source "$ML_CONFIG_FILE"
+}
+
+# Show dmenu with a given placeholder and items piped via stdin
+menu() {
+    local placeholder="$1"
+    shift
+    printf '%s\n' "$@" | eval "$MENU_CMD '$placeholder'"
+}
+
+# Write or update a key=value pair in the user config file
+set_config_key() {
+    local key="$1" value="$2"
+    mkdir -p "$ML_CONFIG_DIR"
+
+    if [[ ! -f "$ML_CONFIG_FILE" ]]; then
+        if [[ -f "$SHARE_CONFIG" ]]; then
+            cp "$SHARE_CONFIG" "$ML_CONFIG_FILE"
+        else
+            touch "$ML_CONFIG_FILE"
+        fi
+    fi
+
+    if grep -q "^${key}=" "$ML_CONFIG_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$ML_CONFIG_FILE"
+    else
+        printf '\n%s=%s\n' "$key" "$value" >> "$ML_CONFIG_FILE"
+    fi
+    info "Set $key=$value"
+}
+
+# Print a human-readable preview of the current workspace distribution
+preview_distribution() {
+    local n="$1" dist="$2" total="$3"
+    mapfile -t monitors < <(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name')
+
+    if [[ -z "$dist" ]]; then
+        local base=$(( total / n )) rem=$(( total % n )) start=1
+        printf 'Auto-distribution (%d workspaces, %d monitors):\n' "$total" "$n"
+        for (( i=0; i<n; i++ )); do
+            local c=$base; (( i < rem )) && (( c++ ))
+            local end=$(( start + c - 1 ))
+            printf '  %-20s WS %2d–%2d  (%d workspaces)\n' \
+                "${monitors[$i]:-Monitor $((i+1))}" "$start" "$end" "$c"
+            start=$(( start + c ))
+        done
+    else
+        printf 'Custom distribution:\n'
+        local idx=0 start=1
+        read -ra parts <<< "$dist"
+        for part in "${parts[@]}"; do
+            if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                printf '  %-20s WS %2s–%2s\n' \
+                    "${monitors[$idx]:-Monitor $((idx+1))}" \
+                    "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+                start=$(( BASH_REMATCH[2] + 1 ))
+            elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                local end=$(( start + part - 1 ))
+                printf '  %-20s WS %2d–%2d  (%d workspaces)\n' \
+                    "${monitors[$idx]:-Monitor $((idx+1))}" "$start" "$end" "$part"
+                start=$(( start + part ))
+            fi
+            (( idx++ )) || true
+        done
+    fi
+}
+
+# ── Handlers ───────────────────────────────────────────────────────────────────
+handle_workspaces() {
+    local current="$TOTAL_WORKSPACES"
+    local choice
+    choice=$(menu "Total workspaces (current: ${current}):" \
+        "6"  \
+        "8"  \
+        "9"  \
+        "10 — default" \
+        "12" \
+        "15" \
+        "20" \
+    ) || return 0
+
+    local num
+    num=$(awk '{print $1}' <<< "$choice")
+    [[ "$num" =~ ^[0-9]+$ ]] || die "Not a number: $num"
+    set_config_key TOTAL_WORKSPACES "$num"
+    # Reset distribution so auto recalculates with new total
+    set_config_key WORKSPACE_DISTRIBUTION '""'
+}
+
+handle_distribution() {
+    local n="$1"
+    local preview
+    preview=$(preview_distribution "$n" "$WORKSPACE_DISTRIBUTION" "$TOTAL_WORKSPACES")
+
+    # Show preview, ignore selection (just informational)
+    printf '%s\n' "$preview" | eval "$MENU_CMD 'Current distribution (Esc to continue):'" 2>/dev/null || true
+
+    local mode
+    mode=$(menu "Distribution mode:" \
+        "auto — evenly split, remainder on first monitors" \
+        "guided — choose per-monitor workspace counts" \
+        "editor — open config file in \$EDITOR" \
+    ) || return 0
+
+    case "$(awk '{print $1}' <<< "$mode")" in
+        auto)
+            set_config_key WORKSPACE_DISTRIBUTION '""'
+            ;;
+        guided)
+            local dist="" start=1
+            local base=$(( TOTAL_WORKSPACES / n ))
+            local rem=$(( TOTAL_WORKSPACES  % n ))
+            mapfile -t monitors < <(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name')
+
+            for (( i=0; i<n; i++ )); do
+                local suggested=$base
+                (( i < rem )) && (( suggested++ ))
+                local suggested_end=$(( start + suggested - 1 ))
+                local mon="${monitors[$i]:-Monitor $((i+1))}"
+
+                # Build option list: suggested + ±1 alternates
+                local opts=()
+                opts+=("${start}-${suggested_end}  (${suggested} WS) — suggested")
+                if (( suggested > 1 )); then
+                    opts+=("${start}-$(( suggested_end - 1 ))  ($(( suggested - 1 )) WS)")
+                fi
+                opts+=("${start}-$(( suggested_end + 1 ))  ($(( suggested + 1 )) WS)")
+
+                local pick
+                pick=$(menu "Monitor $((i+1)) — ${mon}:" "${opts[@]}") || break
+
+                local range
+                range=$(awk '{print $1}' <<< "$pick")
+                dist+="$range "
+
+                if [[ "$range" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    start=$(( BASH_REMATCH[2] + 1 ))
+                fi
+            done
+
+            dist="${dist% }"
+            [[ -n "$dist" ]] && set_config_key WORKSPACE_DISTRIBUTION "\"$dist\""
+            ;;
+        editor)
+            "${EDITOR:-nano}" "$ML_CONFIG_FILE"
+            ;;
+    esac
+}
+
+handle_direction() {
+    local current="$EXTEND_DIRECTION"
+    local choice
+    choice=$(menu "Extend direction (current: ${current}):" \
+        "horizontal — monitors side by side (← →)" \
+        "vertical   — monitors stacked (↑ ↓)" \
+    ) || return 0
+    set_config_key EXTEND_DIRECTION "$(awk '{print $1}' <<< "$choice")"
+}
+
+handle_monitors() {
+    local mon_list
+    mon_list=$(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name' | tr '\n' ' ')
+    local choice
+    choice=$(menu "Monitor priority (detected: ${mon_list}):" \
+        "auto   — use hyprctl detection order" \
+        "editor — set PRIMARY/SECONDARY/TERTIARY_MONITOR manually" \
+    ) || return 0
+
+    case "$(awk '{print $1}' <<< "$choice")" in
+        auto)
+            set_config_key PRIMARY_MONITOR '""'
+            set_config_key SECONDARY_MONITOR '""'
+            set_config_key TERTIARY_MONITOR '""'
+            ;;
+        editor)
+            "${EDITOR:-nano}" "$ML_CONFIG_FILE"
+            ;;
+    esac
+}
+
+handle_reset() {
+    local confirm
+    confirm=$(menu "Reset all settings to defaults?" \
+        "yes — reset (cannot be undone)" \
+        "no  — cancel" \
+    ) || return 0
+
+    [[ "$(awk '{print $1}' <<< "$confirm")" == yes ]] || return 0
+
+    if [[ -f "$SHARE_CONFIG" ]]; then
+        cp "$SHARE_CONFIG" "$ML_CONFIG_FILE"
+        info "Config reset from $SHARE_CONFIG"
+    else
+        rm -f "$ML_CONFIG_FILE"
+        info "Config cleared"
+    fi
+}
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+main() {
+    command -v hyprctl &>/dev/null || die "hyprctl not found"
+    load_config
+
+    local n
+    n=$(hyprctl monitors all -j 2>/dev/null | jq 'length')
+    (( n >= 1 )) || die "No monitors detected"
+
+    local dist_label="${WORKSPACE_DISTRIBUTION:-auto}"
+    local action
+    action=$(menu "monitor-layout config:" \
+        "workspaces   — total workspace count  (current: ${TOTAL_WORKSPACES})" \
+        "distribution — per-monitor split       (current: ${dist_label})" \
+        "direction    — extend arrangement      (current: ${EXTEND_DIRECTION})" \
+        "monitors     — monitor priority order" \
+        "preview      — show current distribution" \
+        "reset        — restore all defaults" \
+    ) || exit 0
+
+    case "$(awk '{print $1}' <<< "$action")" in
+        workspaces)   handle_workspaces ;;
+        distribution) handle_distribution "$n" ;;
+        direction)    handle_direction ;;
+        monitors)     handle_monitors ;;
+        preview)
+            preview_distribution "$n" "$WORKSPACE_DISTRIBUTION" "$TOTAL_WORKSPACES" \
+                | eval "$MENU_CMD 'Distribution preview:'" 2>/dev/null || true
+            ;;
+        reset)        handle_reset ;;
+    esac
+}
+
+main "$@"

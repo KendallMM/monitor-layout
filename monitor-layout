@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# monitor-layout — Dynamic monitor management for Hyprland + Omarchy
+# https://github.com/bryanmarin/monitor-layout
+#
+# Solves the split-monitor-workspaces plugin conflict: rewrites monitors.lua
+# before reload so monitor_priority is correct from the start instead of
+# fighting the plugin with moveworkspacetomonitor post-reload.
+#
+# Dependencies: hyprctl, jq, walker (default) or any dmenu via MENU_CMD
+#
+# Usage:
+#   monitor-layout                        # interactive menu  (Super+P)
+#   monitor-layout extend|mirror|primary|secondary
+#
+# Config: ~/.config/monitor-layout/config
+
+set -euo pipefail
+
+# ── XDG paths ──────────────────────────────────────────────────────────────────
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+ML_CONFIG_DIR="$XDG_CONFIG_HOME/monitor-layout"
+ML_CONFIG_FILE="$ML_CONFIG_DIR/config"
+HYPR_MONITOR_CONFIG="${HYPR_MONITOR_CONFIG:-$XDG_CONFIG_HOME/hypr/monitors.lua}"
+
+# ── Defaults (overridable via config file or env) ──────────────────────────────
+TOTAL_WORKSPACES=10
+WORKSPACE_DISTRIBUTION=""   # empty = auto; "1-4 5-7 8-10" or "4 3 3"
+PRIMARY_MONITOR=""
+SECONDARY_MONITOR=""
+TERTIARY_MONITOR=""
+EXTEND_DIRECTION=horizontal # horizontal | vertical
+MENU_CMD="walker --dmenu --placeholder 'Monitor layout:'"
+
+# ── Load user config ───────────────────────────────────────────────────────────
+load_config() {
+    [[ -f "$ML_CONFIG_FILE" ]] && source "$ML_CONFIG_FILE"
+}
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+info() { printf 'info: %s\n'  "$*" >&2; }
+
+check_deps() {
+    local missing=()
+    for cmd in hyprctl jq; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    (( ${#missing[@]} == 0 )) || die "Missing dependencies: ${missing[*]}"
+}
+
+# Populate global MONITORS[] and MONITOR_COUNT
+detect_monitors() {
+    local raw
+    raw=$(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name') || true
+
+    if [[ -z "$raw" ]]; then
+        [[ -f "$HYPR_MONITOR_CONFIG" ]] || die "No monitors detected; no config at $HYPR_MONITOR_CONFIG"
+        raw=$(grep -oP "output = '\K[^']+" "$HYPR_MONITOR_CONFIG")
+    fi
+
+    mapfile -t MONITORS <<< "$raw"
+    MONITOR_COUNT=${#MONITORS[@]}
+    (( MONITOR_COUNT >= 1 )) || die "No monitors detected"
+
+    # Named overrides from config file or env
+    [[ -n "${PRIMARY_MONITOR:-}"   ]] && MONITORS[0]="$PRIMARY_MONITOR"
+    [[ -n "${SECONDARY_MONITOR:-}" && MONITOR_COUNT -ge 2 ]] && MONITORS[1]="$SECONDARY_MONITOR"
+    [[ -n "${TERTIARY_MONITOR:-}"  && MONITOR_COUNT -ge 3 ]] && MONITORS[2]="$TERTIARY_MONITOR"
+    # Legacy single-run env vars
+    [[ -n "${PRIMARY:-}"   ]] && MONITORS[0]="$PRIMARY"
+    [[ -n "${SECONDARY:-}" && MONITOR_COUNT -ge 2 ]] && MONITORS[1]="$SECONDARY"
+
+    info "Monitors (${MONITOR_COUNT}): ${MONITORS[*]}"
+}
+
+# Get a monitor's pixel width from hyprctl (fallback: 1920)
+monitor_width() {
+    local mon="$1"
+    local w
+    w=$(hyprctl monitors all -j 2>/dev/null \
+        | jq -r --arg m "$mon" '.[] | select(.name==$m) | .width' 2>/dev/null \
+        | grep -E '^[0-9]+$') || true
+    echo "${w:-1920}"
+}
+
+# Populate MONITOR_WS_COUNTS[] and MONITOR_WS_STARTS[] for N active monitors.
+# With auto-distribution: remainder workspaces go to the first monitors.
+#   10 WS, 2 monitors → 5,5   (1-5 | 6-10)
+#   10 WS, 3 monitors → 4,3,3 (1-4 | 5-7 | 8-10)
+compute_distribution() {
+    local n="$1"
+    MONITOR_WS_COUNTS=()
+    MONITOR_WS_STARTS=()
+
+    if [[ -n "$WORKSPACE_DISTRIBUTION" ]]; then
+        local idx=0 start=1
+        read -ra parts <<< "$WORKSPACE_DISTRIBUTION"
+        for part in "${parts[@]}"; do
+            if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                MONITOR_WS_STARTS[$idx]="${BASH_REMATCH[1]}"
+                MONITOR_WS_COUNTS[$idx]=$(( BASH_REMATCH[2] - BASH_REMATCH[1] + 1 ))
+                start=$(( BASH_REMATCH[2] + 1 ))
+            elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                MONITOR_WS_STARTS[$idx]=$start
+                MONITOR_WS_COUNTS[$idx]=$part
+                start=$(( start + part ))
+            else
+                die "Bad WORKSPACE_DISTRIBUTION token '$part'. Use '1-4 5-7 8-10' or '4 3 3'."
+            fi
+            (( idx++ )) || true
+        done
+        while (( idx < n )); do
+            MONITOR_WS_COUNTS[$idx]=0
+            MONITOR_WS_STARTS[$idx]=$start
+            (( idx++ )) || true
+        done
+    else
+        local base=$(( TOTAL_WORKSPACES / n ))
+        local rem=$(( TOTAL_WORKSPACES  % n ))
+        local start=1
+        for (( i=0; i<n; i++ )); do
+            local c=$base
+            (( i < rem )) && (( c++ ))
+            MONITOR_WS_STARTS[$i]=$start
+            MONITOR_WS_COUNTS[$i]=$c
+            start=$(( start + c ))
+        done
+    fi
+
+    for (( i=0; i<n; i++ )); do
+        local end=$(( MONITOR_WS_STARTS[i] + MONITOR_WS_COUNTS[i] - 1 ))
+        info "  ${MONITORS[$i]}: WS ${MONITOR_WS_STARTS[$i]}-${end} (${MONITOR_WS_COUNTS[$i]} WS)"
+    done
+}
+
+# Emit the split-monitor-workspaces Lua plugin block.
+# Uses the largest per-monitor count so the plugin covers all ranges.
+plugin_config() {
+    local n="$1"
+    local max_count=0
+    for (( i=0; i<n; i++ )); do
+        (( MONITOR_WS_COUNTS[i] > max_count )) && max_count=${MONITOR_WS_COUNTS[i]}
+    done
+
+    local priorities=""
+    for (( i=0; i<n; i++ )); do
+        priorities+="\"${MONITORS[$i]}\", "
+    done
+    priorities="${priorities%, }"
+
+    cat << LUAEOF
+hl.config({
+    plugin = {
+        split_monitor_workspaces = {
+            count = $max_count,
+            enable_persistent_workspaces = 1,
+            keep_focused = 0,
+            enable_wrapping = 1,
+            link_monitors = 0,
+            enable_notifications = 0,
+        },
+    },
+})
+local smw = hl.plugin.split_monitor_workspaces
+if smw then smw.monitor_priority({ $priorities }) end
+LUAEOF
+}
+
+# Emit per-workspace monitor-assignment rules for non-uniform custom distributions.
+# These pin each workspace to its monitor so Hyprland respects the custom split.
+workspace_rules() {
+    local n="$1"
+
+    # Auto-distribution is always uniform — the plugin handles it, no rules needed.
+    [[ -z "$WORKSPACE_DISTRIBUTION" ]] && return
+
+    local base=${MONITOR_WS_COUNTS[0]}
+    local uniform=true
+    for (( i=1; i<n; i++ )); do
+        (( MONITOR_WS_COUNTS[i] != base )) && uniform=false && break
+    done
+    "$uniform" && return
+
+    for (( i=0; i<n; i++ )); do
+        (( MONITOR_WS_COUNTS[i] == 0 )) && continue
+        local s=${MONITOR_WS_STARTS[$i]}
+        local e=$(( s + MONITOR_WS_COUNTS[i] - 1 ))
+        local m="${MONITORS[$i]}"
+        for (( ws=s; ws<=e; ws++ )); do
+            printf 'hl.keyword("workspace", "%d, monitor:%s, default:true, persistent:true")\n' "$ws" "$m"
+        done
+    done
+}
+
+# ── I/O helpers ────────────────────────────────────────────────────────────────
+write_hypr_config() { cat > "$HYPR_MONITOR_CONFIG"; }
+
+active_monitor_count() { hyprctl monitors -j | jq 'length'; }
+
+wait_monitor_up() {
+    local mon="$1" attempts=40
+    while (( attempts-- > 0 )); do
+        hyprctl monitors -j \
+            | jq -e --arg m "$mon" '.[] | select(.name==$m)' \
+            >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    printf 'warning: timeout waiting for %s to become active\n' "$mon" >&2
+    return 1
+}
+
+restart_waybar() {
+    pkill waybar 2>/dev/null || true
+    sleep 0.3
+    waybar &>/dev/null & disown
+}
+
+# ── Layouts ────────────────────────────────────────────────────────────────────
+layout_extend() {
+    local n=$MONITOR_COUNT
+    local active
+    active=$(active_monitor_count)
+
+    # If fewer monitors are active than expected, reset to single first to avoid
+    # plugin state corruption before enabling additional monitors.
+    if (( active < n )); then
+        info "Resetting to single before extend..."
+        MONITOR_WS_COUNTS=("$TOTAL_WORKSPACES"); MONITOR_WS_STARTS=(1)
+        {
+            printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 'auto' })\n" \
+                "${MONITORS[0]}"
+            for (( i=1; i<n; i++ )); do
+                printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x-1080', scale = 1, disabled = true })\n" \
+                    "${MONITORS[$i]}"
+            done
+            printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+                "$TOTAL_WORKSPACES"
+            printf 'local smw = hl.plugin.split_monitor_workspaces\n'
+            printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "${MONITORS[0]}"
+        } | write_hypr_config
+        hyprctl reload
+        sleep 0.3
+    fi
+
+    compute_distribution "$n"
+
+    {
+        local offset=0
+        for (( i=0; i<n; i++ )); do
+            local scale="auto"
+            (( i > 0 )) && scale=1
+            if [[ "$EXTEND_DIRECTION" == vertical ]]; then
+                printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x%d', scale = %s })\n" \
+                    "${MONITORS[$i]}" "$offset" "$scale"
+                (( offset -= 1080 ))
+            else
+                printf "hl.monitor({ output = '%s', mode = 'preferred', position = '%dx0', scale = %s })\n" \
+                    "${MONITORS[$i]}" "$offset" "$scale"
+                local w
+                w=$(monitor_width "${MONITORS[$i]}")
+                (( offset += w ))
+            fi
+        done
+        plugin_config "$n"
+        workspace_rules "$n"
+    } | write_hypr_config
+
+    hyprctl reload
+    for (( i=1; i<n; i++ )); do
+        wait_monitor_up "${MONITORS[$i]}"
+    done
+    restart_waybar
+}
+
+layout_mirror() {
+    local primary="${MONITORS[0]}"
+    MONITOR_WS_COUNTS=("$TOTAL_WORKSPACES"); MONITOR_WS_STARTS=(1)
+    {
+        printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 'auto' })\n" "$primary"
+        for (( i=1; i<MONITOR_COUNT; i++ )); do
+            printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 1, mirror = '%s' })\n" \
+                "${MONITORS[$i]}" "$primary"
+        done
+        printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+            "$TOTAL_WORKSPACES"
+        printf 'local smw = hl.plugin.split_monitor_workspaces\n'
+        printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "$primary"
+    } | write_hypr_config
+    hyprctl reload
+    # Mirrored monitors share the primary's entry in hyprctl; no wait_monitor_up needed.
+    restart_waybar
+}
+
+layout_primary_only() {
+    MONITOR_WS_COUNTS=("$TOTAL_WORKSPACES"); MONITOR_WS_STARTS=(1)
+    {
+        printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 'auto' })\n" \
+            "${MONITORS[0]}"
+        for (( i=1; i<MONITOR_COUNT; i++ )); do
+            printf "hl.monitor({ output = '%s', disabled = true })\n" "${MONITORS[$i]}"
+        done
+        printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+            "$TOTAL_WORKSPACES"
+        printf 'local smw = hl.plugin.split_monitor_workspaces\n'
+        printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "${MONITORS[0]}"
+    } | write_hypr_config
+    hyprctl reload
+    restart_waybar
+}
+
+layout_secondary_only() {
+    (( MONITOR_COUNT >= 2 )) || die "No secondary monitor detected"
+    MONITOR_WS_COUNTS=("$TOTAL_WORKSPACES"); MONITOR_WS_STARTS=(1)
+    {
+        printf "hl.monitor({ output = '%s', disabled = true })\n" "${MONITORS[0]}"
+        printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 1 })\n" \
+            "${MONITORS[1]}"
+        for (( i=2; i<MONITOR_COUNT; i++ )); do
+            printf "hl.monitor({ output = '%s', disabled = true })\n" "${MONITORS[$i]}"
+        done
+        printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+            "$TOTAL_WORKSPACES"
+        printf 'local smw = hl.plugin.split_monitor_workspaces\n'
+        printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "${MONITORS[1]}"
+    } | write_hypr_config
+    hyprctl reload
+    restart_waybar
+}
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+main() {
+    check_deps
+    load_config
+    detect_monitors
+
+    local choice="${1:-}"
+    if [[ -z "$choice" ]]; then
+        local p="${MONITORS[0]}" s="${MONITORS[1]:-secondary}"
+        choice=$(printf 'extend — all %d monitors side by side\nmirror — duplicate primary on all others\nprimary — only %s\nsecondary — only %s\n' \
+            "$MONITOR_COUNT" "$p" "$s" \
+            | eval "$MENU_CMD" | awk '{print $1}')
+    fi
+
+    [[ -n "$choice" ]] || die "No layout selected"
+
+    case "$choice" in
+        extend)    layout_extend ;;
+        mirror)    layout_mirror ;;
+        primary)   layout_primary_only ;;
+        secondary) layout_secondary_only ;;
+        *) die "Unknown layout '$choice'. Valid: extend mirror primary secondary" ;;
+    esac
+}
+
+main "$@"
