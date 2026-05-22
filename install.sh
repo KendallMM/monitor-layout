@@ -80,7 +80,7 @@ else
         # Add Super+Alt+P for config UI
         cat >> "$BINDINGS_FILE" << 'EOF'
 
-# monitor-layout
+-- monitor-layout
 o.bind("SUPER + ALT + P", "Monitor WS config", "monitor-layout-config")
 EOF
         ok "Added Super+Alt+P → monitor-layout-config to $BINDINGS_FILE"
