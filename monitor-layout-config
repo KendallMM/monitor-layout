@@ -19,6 +19,7 @@ PRIMARY_MONITOR=""
 SECONDARY_MONITOR=""
 TERTIARY_MONITOR=""
 EXTEND_DIRECTION=horizontal
+EXTEND_ORDER=""
 MENU_CMD="walker --dmenu --placeholder"
 
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -92,6 +93,16 @@ preview_distribution() {
     fi
 }
 
+apply_now() {
+    local confirm
+    confirm=$(menu "Apply layout now?" \
+        "yes — run monitor-layout extend" \
+        "no  — apply later via Super+P" \
+    ) || return 0
+    [[ "$(awk '{print $1}' <<< "$confirm")" == yes ]] || return 0
+    monitor-layout extend
+}
+
 # ── Handlers ───────────────────────────────────────────────────────────────────
 handle_workspaces() {
     local current="$TOTAL_WORKSPACES"
@@ -112,6 +123,7 @@ handle_workspaces() {
     set_config_key TOTAL_WORKSPACES "$num"
     # Reset distribution so auto recalculates with new total
     set_config_key WORKSPACE_DISTRIBUTION '""'
+    apply_now
 }
 
 handle_distribution() {
@@ -172,6 +184,7 @@ handle_distribution() {
             "${EDITOR:-nano}" "$ML_CONFIG_FILE"
             ;;
     esac
+    apply_now
 }
 
 handle_direction() {
@@ -182,27 +195,58 @@ handle_direction() {
         "vertical   — monitors stacked (↑ ↓)" \
     ) || return 0
     set_config_key EXTEND_DIRECTION "$(awk '{print $1}' <<< "$choice")"
+    apply_now
 }
 
 handle_monitors() {
-    local mon_list
-    mon_list=$(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name' | tr '\n' ' ')
-    local choice
-    choice=$(menu "Monitor priority (detected: ${mon_list}):" \
-        "auto   — use hyprctl detection order" \
-        "editor — set PRIMARY/SECONDARY/TERTIARY_MONITOR manually" \
-    ) || return 0
+    mapfile -t all_monitors < <(hyprctl monitors all -j 2>/dev/null | jq -r '.[].name')
+    local n=${#all_monitors[@]}
 
-    case "$(awk '{print $1}' <<< "$choice")" in
-        auto)
-            set_config_key PRIMARY_MONITOR '""'
-            set_config_key SECONDARY_MONITOR '""'
-            set_config_key TERTIARY_MONITOR '""'
-            ;;
-        editor)
-            "${EDITOR:-nano}" "$ML_CONFIG_FILE"
-            ;;
-    esac
+    # Step 1: pick primary monitor (workspace priority)
+    local primary
+    primary=$(menu "Step 1 — Which monitor is PRIMARY (gets lowest workspace numbers)?" \
+        "${all_monitors[@]}") || return 0
+    set_config_key PRIMARY_MONITOR "\"$primary\""
+    set_config_key SECONDARY_MONITOR '""'
+    set_config_key TERTIARY_MONITOR '""'
+
+    local remaining=()
+    for m in "${all_monitors[@]}"; do
+        [[ "$m" != "$primary" ]] && remaining+=("$m")
+    done
+
+    # Assign secondary/tertiary in remaining order (workspace priority)
+    (( n >= 2 )) && set_config_key SECONDARY_MONITOR "\"${remaining[0]}\""
+    (( n >= 3 )) && set_config_key TERTIARY_MONITOR "\"${remaining[1]}\""
+
+    (( n < 2 )) && { apply_now; return 0; }
+
+    # Step 2+: ask physical position of each monitor relative to previous
+    local -a pos_order=("$primary")
+    local extend_dir=""
+    local prev="$primary"
+    local step=2
+
+    for m in "${remaining[@]}"; do
+        local rel
+        rel=$(menu "Step ${step} — Where is ${m} physically relative to ${prev}?" \
+            "above" "below" "left" "right") || break
+
+        case "$rel" in
+            above) extend_dir="vertical";    pos_order=("$m" "${pos_order[@]}") ;;
+            below) extend_dir="vertical";    pos_order+=("$m") ;;
+            left)  extend_dir="horizontal";  pos_order=("$m" "${pos_order[@]}") ;;
+            right) extend_dir="horizontal";  pos_order+=("$m") ;;
+        esac
+
+        prev="$m"
+        (( step++ ))
+    done
+
+    [[ -n "$extend_dir" ]] && set_config_key EXTEND_DIRECTION "$extend_dir"
+    set_config_key EXTEND_ORDER "\"${pos_order[*]}\""
+
+    apply_now
 }
 
 handle_reset() {
@@ -238,7 +282,7 @@ main() {
         "workspaces   — total workspace count  (current: ${TOTAL_WORKSPACES})" \
         "distribution — per-monitor split       (current: ${dist_label})" \
         "direction    — extend arrangement      (current: ${EXTEND_DIRECTION})" \
-        "monitors     — monitor priority order" \
+        "monitors     — priority & physical position" \
         "preview      — show current distribution" \
         "reset        — restore all defaults" \
     ) || exit 0

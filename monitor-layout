@@ -29,6 +29,7 @@ PRIMARY_MONITOR=""
 SECONDARY_MONITOR=""
 TERTIARY_MONITOR=""
 EXTEND_DIRECTION=horizontal # horizontal | vertical
+EXTEND_ORDER=""             # physical position order (left→right or top→bottom); empty = use monitor priority order
 MENU_CMD="walker --dmenu --placeholder 'Monitor layout:'"
 
 # ── Load user config ───────────────────────────────────────────────────────────
@@ -81,6 +82,16 @@ monitor_width() {
         | jq -r --arg m "$mon" '.[] | select(.name==$m) | .width' 2>/dev/null \
         | grep -E '^[0-9]+$') || true
     echo "${w:-1920}"
+}
+
+# Get a monitor's pixel height from hyprctl (fallback: 1080)
+monitor_height() {
+    local mon="$1"
+    local h
+    h=$(hyprctl monitors all -j 2>/dev/null \
+        | jq -r --arg m "$mon" '.[] | select(.name==$m) | .height' 2>/dev/null \
+        | grep -E '^[0-9]+$') || true
+    echo "${h:-1080}"
 }
 
 # Populate MONITOR_WS_COUNTS[] and MONITOR_WS_STARTS[] for N active monitors.
@@ -244,6 +255,12 @@ layout_extend() {
 
     compute_distribution "$n"
 
+    # Physical position order — may differ from workspace priority order
+    local -a POS_MONITORS=("${MONITORS[@]}")
+    if [[ -n "${EXTEND_ORDER:-}" ]]; then
+        read -ra POS_MONITORS <<< "$EXTEND_ORDER"
+    fi
+
     {
         local offset=0
         for (( i=0; i<n; i++ )); do
@@ -251,13 +268,15 @@ layout_extend() {
             (( i > 0 )) && scale=1
             if [[ "$EXTEND_DIRECTION" == vertical ]]; then
                 printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x%d', scale = %s })\n" \
-                    "${MONITORS[$i]}" "$offset" "$scale"
-                (( offset -= 1080 ))
+                    "${POS_MONITORS[$i]}" "$offset" "$scale"
+                local h
+                h=$(monitor_height "${POS_MONITORS[$i]}")
+                (( offset += h ))
             else
                 printf "hl.monitor({ output = '%s', mode = 'preferred', position = '%dx0', scale = %s })\n" \
-                    "${MONITORS[$i]}" "$offset" "$scale"
+                    "${POS_MONITORS[$i]}" "$offset" "$scale"
                 local w
-                w=$(monitor_width "${MONITORS[$i]}")
+                w=$(monitor_width "${POS_MONITORS[$i]}")
                 (( offset += w ))
             fi
         done
