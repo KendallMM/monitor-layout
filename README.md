@@ -75,13 +75,20 @@ TOTAL_WORKSPACES=10
 #   "4 3 3"           (count format)
 WORKSPACE_DISTRIBUTION=""
 
-# Monitor priority — leave empty for auto-detect
+# Monitor priority — controls workspace numbering order (primary gets lowest numbers)
+# Leave empty for auto-detect
 PRIMARY_MONITOR=""
 SECONDARY_MONITOR=""
 TERTIARY_MONITOR=""
 
 # Extend layout direction: horizontal (default) or vertical
 EXTEND_DIRECTION=horizontal
+
+# Physical position order for extend mode (left→right or top→bottom)
+# Set automatically by the "monitors" configurator, or manually:
+#   EXTEND_ORDER="HDMI-A-2 DP-2"   (HDMI on top/left, DP on bottom/right)
+# Leave empty to use the monitor priority order above
+EXTEND_ORDER=""
 
 # Menu launcher
 MENU_CMD="walker --dmenu --placeholder 'Monitor layout:'"
@@ -106,8 +113,12 @@ The interactive configurator (`Super+Alt+P`) guides you through:
 
 1. **Total workspaces** — change from 10 to any number
 2. **Distribution** — auto, guided (per-monitor), or open in `$EDITOR`
-3. **Extend direction** — horizontal or vertical
-4. **Monitor priority** — reorder which monitor is "primary"
+3. **Direction** — horizontal or vertical extend arrangement
+4. **Monitors** — set workspace priority and physical position in one flow:
+   - Step 1: pick the **primary** monitor (receives the lowest workspace numbers)
+   - Step 2+: for each remaining monitor, select its physical position relative to the previous one (`above` / `below` / `left` / `right`) — this sets both the extend direction and the physical mouse-crossing order
+
+After each change the configurator asks **"Apply now?"** so the layout reloads immediately without needing to use `Super+P`.
 
 For non-uniform distributions (e.g. 4 + 3 + 3), the script generates Hyprland workspace rules alongside the plugin config. Behavior depends on your plugin version — uniform distribution always works perfectly.
 
