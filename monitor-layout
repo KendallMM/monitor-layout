@@ -160,20 +160,22 @@ plugin_config() {
     priorities="${priorities%, }"
 
     cat << LUAEOF
-hl.config({
-    plugin = {
-        split_monitor_workspaces = {
-            count = $max_count,
-            enable_persistent_workspaces = 1,
-            keep_focused = 0,
-            enable_wrapping = 1,
-            link_monitors = 0,
-            enable_notifications = 0,
-        },
-    },
-})
 local smw = hl.plugin.split_monitor_workspaces
-if smw then smw.monitor_priority({ $priorities }) end
+if smw then
+    hl.config({
+        plugin = {
+            split_monitor_workspaces = {
+                count = $max_count,
+                enable_persistent_workspaces = 1,
+                keep_focused = 0,
+                enable_wrapping = 1,
+                link_monitors = 0,
+                enable_notifications = 0,
+            },
+        },
+    })
+    smw.monitor_priority({ $priorities })
+end
 LUAEOF
 }
 
@@ -244,10 +246,12 @@ layout_extend() {
                 printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x-1080', scale = 1, disabled = true })\n" \
                     "${MONITORS[$i]}"
             done
-            printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
-                "$TOTAL_WORKSPACES"
             printf 'local smw = hl.plugin.split_monitor_workspaces\n'
-            printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "${MONITORS[0]}"
+            printf 'if smw then\n'
+            printf '    hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+                "$TOTAL_WORKSPACES"
+            printf '    smw.monitor_priority({ "%s" })\n' "${MONITORS[0]}"
+            printf 'end\n'
         } | write_hypr_config
         hyprctl reload
         sleep 0.3
@@ -300,10 +304,12 @@ layout_mirror() {
             printf "hl.monitor({ output = '%s', mode = 'preferred', position = '0x0', scale = 1, mirror = '%s' })\n" \
                 "${MONITORS[$i]}" "$primary"
         done
-        printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
-            "$TOTAL_WORKSPACES"
         printf 'local smw = hl.plugin.split_monitor_workspaces\n'
-        printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "$primary"
+        printf 'if smw then\n'
+        printf '    hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+            "$TOTAL_WORKSPACES"
+        printf '    smw.monitor_priority({ "%s" })\n' "$primary"
+        printf 'end\n'
     } | write_hypr_config
     hyprctl reload
     # Mirrored monitors share the primary's entry in hyprctl; no wait_monitor_up needed.
@@ -318,10 +324,12 @@ layout_primary_only() {
         for (( i=1; i<MONITOR_COUNT; i++ )); do
             printf "hl.monitor({ output = '%s', disabled = true })\n" "${MONITORS[$i]}"
         done
-        printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
-            "$TOTAL_WORKSPACES"
         printf 'local smw = hl.plugin.split_monitor_workspaces\n'
-        printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "${MONITORS[0]}"
+        printf 'if smw then\n'
+        printf '    hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+            "$TOTAL_WORKSPACES"
+        printf '    smw.monitor_priority({ "%s" })\n' "${MONITORS[0]}"
+        printf 'end\n'
     } | write_hypr_config
     hyprctl reload
     restart_waybar
@@ -337,10 +345,12 @@ layout_secondary_only() {
         for (( i=2; i<MONITOR_COUNT; i++ )); do
             printf "hl.monitor({ output = '%s', disabled = true })\n" "${MONITORS[$i]}"
         done
-        printf 'hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
-            "$TOTAL_WORKSPACES"
         printf 'local smw = hl.plugin.split_monitor_workspaces\n'
-        printf 'if smw then smw.monitor_priority({ "%s" }) end\n' "${MONITORS[1]}"
+        printf 'if smw then\n'
+        printf '    hl.config({ plugin = { split_monitor_workspaces = { count = %d, enable_persistent_workspaces = 1, keep_focused = 0, enable_wrapping = 1, link_monitors = 0, enable_notifications = 0 } } })\n' \
+            "$TOTAL_WORKSPACES"
+        printf '    smw.monitor_priority({ "%s" })\n' "${MONITORS[1]}"
+        printf 'end\n'
     } | write_hypr_config
     hyprctl reload
     restart_waybar
