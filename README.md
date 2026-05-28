@@ -2,7 +2,7 @@
 
 Dynamic monitor management for **Hyprland + Omarchy** on CachyOS.
 
-Solves a core conflict with the [`split-monitor-workspaces`](https://github.com/Duckonaut/split-monitor-workspaces) plugin: the plugin blocks `moveworkspacetomonitor` after reload, making runtime workspace reassignment impossible. This tool rewrites `monitors.lua` _before_ the reload, so `monitor_priority` is set correctly from the start.
+Solves a core conflict with the [`split-monitor-workspaces`](https://github.com/Duckonaut/split-monitor-workspaces) plugin: the plugin blocks `moveworkspacetomonitor` after reload, making runtime workspace reassignment impossible. This tool rewrites `monitors.lua` *before* the reload, so `monitor_priority` is set correctly from the start.
 
 ## Features
 
@@ -14,7 +14,7 @@ Solves a core conflict with the [`split-monitor-workspaces`](https://github.com/
 - Supports **2+ monitors** — not just dual
 - **Horizontal or vertical** extend arrangement
 - Queries actual monitor resolution to compute positions (no hardcoded 1920)
-- Restarts Waybar automatically on layout change
+- Restarts the desktop shell automatically on layout change (Waybar by default; see [Quickshell compatibility](https://claude.ai/chat/a1de214e-dce5-44ee-a3f8-36f524736435#quickshell-compatibility))
 - XDG-compliant config at `~/.config/monitor-layout/config`
 
 ## Requirements
@@ -27,13 +27,14 @@ Solves a core conflict with the [`split-monitor-workspaces`](https://github.com/
 ## Installation
 
 ```bash
-git clone https://github.com/bryanmarin/monitor-layout
+git clone https://github.com/KendallMM/monitor-layout
 cd monitor-layout
 bash install.sh
 hyprctl reload
 ```
 
 The installer:
+
 1. Copies `monitor-layout` and `monitor-layout-config` to `~/.local/bin/`
 2. Creates `~/.config/monitor-layout/config` with defaults (never overwrites existing)
 3. Adds `Super+Alt+P` → `monitor-layout-config` to `~/.config/hypr/bindings.lua`
@@ -41,19 +42,19 @@ The installer:
 
 ## Keybinds
 
-| Keybind | Action |
-|---|---|
-| `Super+P` | Interactive layout menu |
+| Keybind       | Action                              |
+| ------------- | ----------------------------------- |
+| `Super+P`     | Interactive layout menu             |
 | `Super+Alt+P` | Workspace distribution configurator |
 
 ## Layouts
 
-| Command | Description |
-|---|---|
-| `extend` | All monitors active, side by side (or stacked) |
-| `mirror` | Secondary mirrors primary |
-| `primary` | Only primary monitor active |
-| `secondary` | Only secondary monitor active |
+| Command     | Description                                    |
+| ----------- | ---------------------------------------------- |
+| `extend`    | All monitors active, side by side (or stacked) |
+| `mirror`    | Secondary mirrors primary                      |
+| `primary`   | Only primary monitor active                    |
+| `secondary` | Only secondary monitor active                  |
 
 Run directly from the terminal:
 
@@ -121,6 +122,50 @@ The interactive configurator (`Super+Alt+P`) guides you through:
 After each change the configurator asks **"Apply now?"** so the layout reloads immediately without needing to use `Super+P`.
 
 For non-uniform distributions (e.g. 4 + 3 + 3), the script generates Hyprland workspace rules alongside the plugin config. Behavior depends on your plugin version — uniform distribution always works perfectly.
+
+## Quickshell compatibility
+
+If you use [Quickshell](https://quickshell.outfoxxed.me/) instead of Waybar as your desktop shell, two changes are needed to make `monitor-layout` work correctly with it.
+
+**1. Update the shell restart function in `monitor-layout`**
+
+In `~/.local/bin/monitor-layout`, replace the `restart_waybar` function:
+
+```bash
+restart_waybar() {
+    pkill waybar 2>/dev/null || true
+    sleep 0.3
+    waybar &>/dev/null & disown
+}
+```
+
+With:
+
+```bash
+restart_shell() {
+    pkill qs 2>/dev/null || true
+    sleep 0.3
+    qs -n -d -c desktop &>/dev/null & disown
+}
+```
+
+And replace all 4 calls to `restart_waybar` in the file with `restart_shell`.
+
+> Adjust `qs -n -d -c desktop` to match your Quickshell config name if different.
+
+**2. Fix the Quickshell bar to follow the primary monitor**
+
+By default Quickshell may place the bar on the wrong monitor after a layout change. To fix it, open your Quickshell config's `Bar.qml` and:
+
+Add `import Quickshell.Hyprland` to the imports block, then set the `screen` property on the `PanelWindow`:
+
+```qml
+screen: Quickshell.screens.find(s => s.name === Hyprland.monitors[0]?.name) ?? Quickshell.screens[0]
+```
+
+This makes the bar dynamically follow whichever monitor Hyprland reports as primary — no hardcoded monitor names needed.
+
+> Tested with [bjarneo/quickshell](https://github.com/bjarneo/quickshell) `desktop` config on CachyOS + Omarchy 4.0 alpha with Hyprland 0.55.
 
 ## Uninstall
 
